@@ -1,0 +1,392 @@
+---
+title: "Fidelity_territory"
+author: "Emily Shertzer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Overview 
+
+This script creates a GLMM used to estimate territory-scale fidelity for the manuscript "Site fidelity of sagebrush songbirds largely invariant with cues of previous nest success or habitat disturbance across spatial scales".
+
+Covariates: disturbance, nest failure rates (plot/year), shrub height, shrub cover
+
+Data: Shertzer, E.R., and Chalfoun, A.D., 2026, Mark recapture and habitat data for adult sagebrush songbirds tracked in Pinedale, Wyoming during 2020 - 2024: U.S. Geological Survey data release, https://doi.org/10.5066/P1EOPE4V.
+
+```{r packages, echo = FALSE}
+# clear environment
+rm(list = ls())
+
+require(jagsUI)
+library(MCMCpack)
+library(abind)
+library(tidyverse)
+library(dplyr)
+library(AHMbook)
+library(lubridate)
+library(ggplot2)
+library(bayestestR)
+
+options(scipen = 999)
+
+```
+
+## Data prep
+
+```{r data_prep}
+surv <- read.csv("./SageSongbirdSurv_Final.csv", colClasses = c(ch = "character"))
+
+ #fix ages.... so that AHY is NA 
+surv <- surv %>%
+  dplyr::mutate(age2020 = dplyr::if_else(Age == 1 & Year == 2020, NA, age2020),
+      age2021 = dplyr::if_else(Age == 1 & Year == 2021, NA, age2021),
+      age2022 = dplyr::if_else(Age == 1 & Year == 2022, NA, age2022),
+      age2023 = dplyr::if_else(Age == 1 & Year == 2023, NA, age2023),
+      age2024 = dplyr::if_else(Age == 1 & Year == 2024, NA, age2024))
+
+test <- surv %>%
+  dplyr::select(BandNumber, Species, Sex, plot,
+                mean_utme_2020, mean_utmn_2020,
+                mean_utme_2021, mean_utmn_2021, 
+                mean_utme_2022, mean_utmn_2022,
+                mean_utme_2023, mean_utmn_2023, 
+                mean_utme_2024, mean_utmn_2024, 
+                kmdistur2020, kmdistur2021, kmdistur2022, kmdistur2023, kmdistur2024,
+                frate2020, frate2021, frate2022, frate2023, frate2024,
+                at_height_mean2020, at_height_mean2021, at_height_mean2022,
+                at_height_mean2023, at_height_mean2024,
+                veg_cover_mean2020, veg_cover_mean2021, veg_cover_mean2022, 
+                veg_cover_mean2023, veg_cover_mean2024, at_vigor_mean2020,
+                at_vigor_mean2021, at_vigor_mean2022, at_vigor_mean2023,
+                at_vigor_mean2024,
+                age2020, age2021, age2022, age2023,
+                depart2020, depart2021, depart2022, depart2023,
+                nests2021, nests2022, nests2023
+  ) %>%
+  dplyr::mutate(
+    dist2020_2021 = as.numeric(sqrt((mean_utme_2021 - mean_utme_2020)^2 +
+                                      (mean_utmn_2021 - mean_utmn_2020)^2)),
+    dist2021_2022 = as.numeric(sqrt((mean_utme_2022 - mean_utme_2021)^2 +
+                                      (mean_utmn_2022 - mean_utmn_2021)^2)),
+    dist2022_2023 = as.numeric(sqrt((mean_utme_2023 - mean_utme_2022)^2 +
+                                      (mean_utmn_2023 - mean_utmn_2022)^2)),
+    dist2023_2024 = as.numeric(sqrt((mean_utme_2024 - mean_utme_2023)^2 +
+                                      (mean_utmn_2024 - mean_utmn_2023)^2))
+  )
+
+plotdat <- test %>%
+  transmute(
+    BandNumber,
+    Species,
+    Sex,
+    plot,
+    year = 2020, 
+    kmdistur = kmdistur2020,
+    frate = frate2020,
+    distance = dist2020_2021,
+    vegheight = at_height_mean2020,
+    vegcov = veg_cover_mean2020,
+    vegvig = at_vigor_mean2020,
+    age = age2020,
+    depart = depart2020,
+    nest = NA
+  ) %>%
+  bind_rows(
+    test %>%
+      transmute(
+        BandNumber,
+        Species,
+        Sex,
+        plot,
+        year = 2021,
+        kmdistur = kmdistur2021,
+        frate = frate2021,
+        distance = dist2021_2022,
+        vegheight = at_height_mean2021,
+        vegcov = veg_cover_mean2021,
+        vegvig = at_vigor_mean2021,
+        age = age2021,
+        depart = depart2021,
+        nest = nests2021
+      ),
+    test %>%
+      transmute(
+        BandNumber,
+        Species,
+        Sex,
+        plot,
+        year = 2022,
+        kmdistur = kmdistur2022,
+        frate = frate2022,
+        distance = dist2022_2023,
+        vegheight = at_height_mean2022,
+        vegcov = veg_cover_mean2022,
+        vegvig = at_vigor_mean2022,
+        age = age2022,
+        depart = depart2022,
+        nest = nests2022
+      ),
+    test %>%
+      transmute(
+        BandNumber,
+        Species,
+        Sex,
+        plot,
+        year = 2023,
+        kmdistur = kmdistur2023,
+        frate = frate2023,
+        distance = dist2023_2024,
+        vegheight = at_height_mean2023,
+        vegcov = veg_cover_mean2023,
+        vegvig = at_vigor_mean2023,
+        age = age2023,
+        depart = depart2023,
+        nest = nests2023
+      )
+  )
+
+#prep data for jags
+
+mod_dat <- plotdat %>%
+  dplyr::filter(!is.na(distance)) %>%
+  dplyr::mutate(sex = case_when(Sex == "M" ~ 1, Sex == "F" ~ 0, Sex == "U" ~ NA_real_))
+
+mod_dat <- mod_dat %>%
+  mutate(
+    species_id = as.integer(as.factor(Species)),
+    band_id = as.integer(as.factor(BandNumber)),
+    year_id = as.integer(as.factor(year)),
+    
+    # Covariates: center/scaled
+    kmdistur_z = scale(kmdistur)[,1],
+    frate_z = scale(frate)[,1],
+    vegheight_z = scale(vegheight)[,1],
+    vegcov_z = scale(vegcov)[,1],
+    vegvig_z = scale(vegvig)[,1],
+    bin_age = dplyr::case_when(is.na(age) ~ NA, age == 2 ~ 1, TRUE ~ 0)) #SY = 1, ASY = 0
+
+mod_dat$logdist <- log(mod_dat$distance)
+mod_dat$logdist[127] <- 0  #problem value
+
+# changing SATH ages to NA
+mod_dat <- mod_dat %>%
+  dplyr::mutate(bin_age = ifelse(Species == "SATH", NA, bin_age))
+
+```
+
+## Model
+
+```{r glmm_model, echo=FALSE}
+sink("site_fidelity_multiveg_yrint.jags")
+cat("
+model {
+
+  ############ Priors ############
+  
+  # data imputation
+  psi ~ dunif(0,1)  #sex ratio
+  psi2 ~ dunif(0,1)  #age ratio
+  
+  mu_frate ~ dnorm(0, 0.01)   
+  tau_frate <- pow(sd_frate, -2)
+  sd_frate ~ dunif(0, 5)
+  
+  mu_vegheight ~ dnorm(0, 0.01) 
+  tau_vegheight <- pow(sd_vegheight, -2)
+  sd_vegheight ~ dunif(0, 5)
+  
+  mu_vegcov ~ dnorm(0, 0.01) 
+  tau_vegcov <- pow(sd_vegcov, -2)
+  sd_vegcov ~ dunif(0, 5)
+
+  # Species-level slopes
+  mu_beta1 ~ dnorm(0, 0.01)
+  mu_beta2 ~ dnorm(0, 0.01)
+  mu_beta3 ~ dnorm(0, 0.01)
+  mu_beta4 ~ dnorm(0, 0.01)
+  mu_beta5 ~ dnorm(0, 0.01)
+  mu_beta6 ~ dnorm(0, 0.01)
+
+  sigma_beta1 ~ dunif(0, 5)
+  tau_beta1 <- pow(sigma_beta1, -2)
+  sigma_beta2 ~ dunif(0, 5)
+  tau_beta2 <- pow(sigma_beta2, -2)
+  sigma_beta3 ~ dunif(0, 5)
+  tau_beta3 <- pow(sigma_beta3, -2)
+  sigma_beta4 ~ dunif(0, 5)
+  tau_beta4 <- pow(sigma_beta4, -2)
+  sigma_beta5 ~ dunif(0, 5)
+  tau_beta5 <- pow(sigma_beta5, -2)
+  sigma_beta6 ~ dunif(0, 5)
+  tau_beta6 <- pow(sigma_beta6, -2)
+
+  for(s in 1:n_spp){
+    beta1[s] ~ dnorm(mu_beta1, tau_beta1)   # sex effect by species
+    beta2[s] ~ dnorm(mu_beta2, tau_beta2)   # frate effect by species
+    beta3[s] ~ dnorm(mu_beta3, tau_beta3)   # disturbance effect by species
+    beta4[s] ~ dnorm(mu_beta4, tau_beta4)   # veg height effect by species
+    beta5[s] ~ dnorm(mu_beta5, tau_beta5)   # veg cover effect by species
+    beta6[s] ~ dnorm(mu_beta6, tau_beta6)   # age effect by species
+  }
+
+
+  # Species-level intercepts
+  mu_beta0 ~ dnorm(0, 0.01)
+  sigma_beta0 ~ dunif(0, 5)
+  tau_beta0 <- pow(sigma_beta0, -2)
+
+for (t in 1:n_prim){
+  for(s in 1:n_spp){
+    beta0[t,s] ~ dnorm(mu_beta0, tau_beta0)
+  }
+}
+
+  # Random Effect of individual
+  sigma_ind ~ dunif(0, 5)
+  tau_ind <- pow(sigma_ind, -2)
+  
+  for(i in 1:n_ind){
+    ind_re[i] ~ dnorm(0, tau_ind)
+  }
+
+  #sex imputation
+  
+  for (i in 1:n_ind){
+    sex[i] ~ dbern(psi)
+}
+
+
+  ############ Likelihood ############
+
+  for(n in 1:n_obs){
+  #imputing missing data
+    age[n] ~ dbern(psi2)
+    frate_z[n] ~ dnorm(mu_frate, tau_frate) 
+    vegheight_z[n] ~ dnorm(mu_vegheight, tau_vegheight)
+    vegcov_z[n] ~ dnorm(mu_vegcov, tau_vegcov)
+  
+    distance[n] ~ dnorm(mu[n], tau)    # response model
+    
+    mu[n] <- beta0[year_id[n],species_id[n]] +
+             beta1[species_id[n]] * sex[band_id[n]] +
+             beta2[species_id[n]] * frate_z[n] +
+             beta3[species_id[n]] * kmdistur_z[n] +
+             beta4[species_id[n]] * vegheight_z[n] +
+             beta5[species_id[n]] * vegcov_z[n] +
+             beta6[species_id[n]] * age[n] +
+             ind_re[band_id[n]]
+  }
+
+  sigma ~ dunif(0, 5)
+  tau <- pow(sigma, -2)
+  
+#Bayesian p-value
+  #copying kery royle vol 1, pg 193:
+  #chi square: sum of (obs-exp) ^ 2 / exp
+
+# Fit assessments: Chi-square test statistic and posterior predictive check
+for(n in 1:n_obs){
+
+chi2[n] <- pow((distance[n]-mu[n]),2) / (sqrt(mu[n])+0.0001) # obs.
+dist.new[n] ~ dnorm(mu[n], tau) # Replicate (new) data set
+chi2.new[n] <- pow((dist.new[n]-mu[n]),2) / (sqrt(mu[n])+0.0001) # exp.
+}
+# Add up discrepancy measures for entire data set
+fit <- sum(chi2[]) # Omnibus test statistic actual data
+fit.new <- sum(chi2.new[]) # Omnibus test statistic replicate data
+
+
+}", fill = TRUE)
+sink()
+
+```
+
+## Model prep and run
+
+```{r prep_run, echo=FALSE}
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# MCMC settings
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+
+n.chains <- 3
+n.thin <- 5
+n.adapt <- 10000
+n.iter <- 100000
+n.burnin <- 15000
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# Bundle data
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+
+data = list(
+  n_obs = nrow(mod_dat),
+  n_ind = length(unique(mod_dat$BandNumber)),
+  n_prim = length(unique(mod_dat$year_id)),
+  n_spp = length(unique(mod_dat$species_id)),
+  distance = mod_dat$logdist,
+  frate_z = mod_dat$frate_z,
+  kmdistur_z = mod_dat$kmdistur_z,
+  vegheight_z = mod_dat$vegheight_z,
+  vegcov_z = mod_dat$vegcov_z,
+  species_id = mod_dat$species_id,
+  band_id = mod_dat$band_id,
+  year_id = mod_dat$year_id,
+  sex = mod_dat$sex,
+  age = mod_dat$bin_age
+)
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# Parameters monitored
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+
+params <- c("beta0","beta1","beta2","beta3", "beta4", "beta5", "beta6",
+            "sigma_ind","sigma_year","sigma_beta","sigma_beta0","psi",
+            "dist.new", "T_obs", "T_rep", "fit", "fit.new")
+
+
+territory_fidel1 <- jags(data = data, parameters.to.save = params, model.file = "site_fidelity_multiveg_yrint.jags", 
+                 n.chains = n.chains, n.adapt = n.adapt, n.iter = n.iter, n.burnin = n.burnin,
+                 n.thin = n.thin, n.cores = n.chains,  parallel = TRUE)
+
+```
+
+
+## Model assessment
+
+
+```{r assessment, echo=FALSE}
+
+jagsUI::densityplot(territory_fidel1)
+jagsUI::traceplot(territory_fidel1)
+
+#Check model fit
+
+# Check for overfitting (make sure there's some variation btwn real and sim values)
+
+dist_new_mean <- apply(territory_fidel1$sims.list$dist.new, 2, mean)
+
+plot(mod_dat$logdist, dist_new_mean,
+     xlab = "Observed distance",
+     ylab = "Posterior predictive mean",
+     pch = 16, col = rgb(0, 0, 0, 0.5))
+abline(0, 1, lwd = 2)
+
+i <- sample(seq_len(nrow(territory_fidel1$sims.list$dist.new)), 1)
+plot(mod_dat$logdist,
+     territory_fidel1$sims.list$dist.new[i, ],
+     xlab = "Observed",
+     ylab = "Replicated")
+abline(0,1)
+
+# check bayesian p-values for under-fitting
+
+bpv <- mean(territory_fidel1$sims.list$fit.new > territory_fidel1$sims.list$fit)
+bpv
+
+```
+

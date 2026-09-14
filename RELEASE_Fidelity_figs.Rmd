@@ -1,0 +1,709 @@
+---
+title: "Fidelity - Figures"
+author: "Emily Shertzer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This script creates figures for the manuscript "Site fidelity of sagebrush songbirds largely invariant with cues of previous nest success or habitat disturbance across spatial scales".
+
+Model outputs from:
+RELEASE_Fidelity_landscape.Rmd
+RELEASE_Fidelity_territory.Rmd
+RELEASE_Fidelity_nestsite.Rmd
+
+Data from: Shertzer, E.R., and Chalfoun, A.D., 2026, Mark recapture and habitat data for adult sagebrush songbirds tracked in Pinedale, Wyoming during 2020 - 2024: U.S. Geological Survey data release, https://doi.org/10.5066/P1EOPE4V.
+
+Geolocator data from MoveBank project Sagebrush songbirds - University of Wyoming - 33-1299; DOI pending data review and release through the MoveBank repository.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, echo = FALSE}
+
+# clear environment
+rm(list = ls())
+library(geosphere)
+library(GeoLight)
+library(changepoint)
+library(BAStag)
+library(devtools)
+library(SGAT)
+library(forecast)
+library(MASS)
+library(mvtnorm)
+library(FLightR)
+library(raster)
+library(fields)
+library(parallel)
+library(readxl)
+library(DT)
+library(ggmap)
+library(crosstalk)
+library(htmltools)
+library(leaflet)
+library(grid)
+library(assignR)
+library(terra)
+library(gridExtra)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggplot2)
+library(sf)
+library(ggspatial)
+library(ggnewscale)
+library(dplyr)
+library(lubridate)
+library(patchwork)
+library(tidyverse)
+# ggmap::register_google()  # Must use your own key
+# register_stadiamaps(, write = FALSE) # Must use your own key
+
+```
+
+## Figure 2
+
+The following code plots the breeding season locations of the three birds with geolocators that showed temporary emigration during one breeding season (two brsp, one sath).
+
+  **Geo:** CB920<br>
+  **Band number:** 291075323<br>
+  **Start date:** 6/01/2021<br>
+  **Recap date:** 5/29/2023<br>
+  **Last/first resights:** 7/12/21 (No resights in 2022) <br>
+  *This bird was tracked for 2 years with the same geolocator*
+
+```{r CB920, echo=FALSE}
+load("./FILEPATH/CB920RESULT_FlightR.Rdata")
+Summary <- readRDS("./FILEPATH/CB920_stationary_prob0.05_min5.rds")
+
+start <- Result$Results$Movement.results$Real.time[700]
+stop <- Result$Results$Movement.results$Real.time[800]
+
+dates <- data.frame(start = start,
+                     stop = stop)
+
+breed_ud_cb920 <- plot_util_distr(Result, dates = dates, geom_polygon.options = list(linetype = "blank"), color.palette = colorRampPalette("#55D6BE"), zoom = 5)
+
+# Request the map
+center <- c(-109.85206, 42.749746)
+s <- paste0(
+  "style=element:geometry%7Ccolor:0xf5f5f5",
+  "&style=element:labels%7Cvisibility:off",
+  "&style=element:labels.icon%7Cvisibility:off",
+  "&style=element:labels.text.fill%7Ccolor:0x616161",
+  "&style=element:labels.text.stroke%7Ccolor:0xf5f5f5",
+  "&style=feature:administrative%7Celement:geometry%7Cvisibility:off",
+  "&style=feature:administrative.country%7Celement:geometry.stroke%7Ccolor:0x000000%7Cvisibility:on",
+  "&style=feature:administrative.province%7Celement:geometry.stroke%7Ccolor:0x8f8f8f%7Cvisibility:on",
+  "&style=feature:poi%7Cvisibility:off",
+  "&style=feature:road%7Cvisibility:off",
+  "&style=feature:transit%7Cvisibility:off",
+  "&style=feature:water%7Celement:geometry%7Ccolor:0xc9c9c9"
+)
+
+
+basemap <- get_googlemap(
+  center = center,
+  zoom = 5,
+  scale = 2,
+  style = s,
+)
+
+sf <- breed_ud_cb920$res_buffers %>%
+  dplyr::mutate(geometry = sf::st_sfc(b)) %>%   
+  dplyr::select(-b) %>%                         
+  st_as_sf(crs = 4326)  
+
+sf_polys <- sf %>% st_cast("POLYGON")
+
+poly_df <- sf_polys %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(lon = X, lat = Y) %>%
+  mutate(group = interaction(L1, L2)) 
+
+cb920 <- ggmap(basemap) +
+  geom_polygon(data = poly_df,
+               aes(x = lon, y = lat, group = group),
+               fill = "#55D6BE", alpha = 0.4) +
+  scale_x_continuous(limits = c(-115, -105), expand = c(0,0)) +
+  scale_y_continuous(limits = c(39, 48.5), expand = c(0,0)) +
+  theme_minimal() +
+  theme(axis.text = element_text(),
+        legend.position = "none")
+```
+
+```{r CB924, echo=FALSE}
+
+load("./FILEPATH/CB924RESULT_FlightR.Rdata")
+Summary <- readRDS("./FILEPATH/CB924_stationary_prob0.2_min5.rds")
+
+#breeding location in the second year
+start <- Result$Results$Movement.results$Real.time[700]  
+#basing this on the Summary$Potential_stat_periods
+stop <- Result$Results$Movement.results$Real.time[800]
+
+dates <- data.frame(start = start,
+                     stop = stop)
+
+breed_ud_cb924 <- plot_util_distr(Result, dates = dates, geom_polygon.options = list(linetype = "blank"), color.palette = colorRampPalette("#55D6BE"), zoom = 6)
+
+sf <- breed_ud_cb924$res_buffers %>%
+  dplyr::mutate(geometry = sf::st_sfc(b)) %>%   
+  dplyr::select(-b) %>%                         
+  st_as_sf(crs = 4326)  
+
+sf_polys <- sf %>% st_cast("POLYGON")
+
+poly_df <- sf_polys %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(lon = X, lat = Y) %>%
+  mutate(group = interaction(L1, L2))  # L1 = polygon ID, L2 = ring ID
+
+cb924 <- ggmap(basemap) +
+  geom_polygon(data = poly_df,
+               aes(x = lon, y = lat, group = group),
+               fill = "#55D6BE", alpha = 0.4) +
+  #geom_text(x = -109.7785, y = 42.3, label = "*", size = 6, color = "black") +
+  scale_x_continuous(limits = c(-115, -105), expand = c(0,0)) +
+  scale_y_continuous(limits = c(39, 48.5), expand = c(0,0)) +
+  theme_minimal() +
+  theme(axis.text = element_text(),
+        legend.position = "none")
+
+
+```
+
+
+```{r CB885, echo=FALSE}
+load("./FILEPATH/CB885RESULT_FlightR_2calibperiods.Rdata")
+Summary <- readRDS("./FILEPATH/CB885_stationary_2calib_prob0.1_min3.rds")
+
+distance <- (distHaversine(cbind(-109.7785, 42.3), cbind(Summary$Stationary.periods$Medianlon[24], Summary$Stationary.periods$Medianlat[24]))/1000) 
+
+start <- Result$Results$Movement.results$Real.time[650]  #basing this on the Summary$Potential_stat_periods - period following breeding
+stop <- Result$Results$Movement.results$Real.time[780]
+
+dates <- data.frame(start = start,
+                     stop = stop)
+
+breed_ud_cb885 <- plot_util_distr(Result, dates = dates, geom_polygon.options = list(linetype = "blank"), color.palette = colorRampPalette("#DDA448"), zoom = 6)
+
+
+sf <- breed_ud_cb885$res_buffers %>%
+  dplyr::mutate(geometry = sf::st_sfc(b)) %>%   
+  dplyr::select(-b) %>%                         
+  st_as_sf(crs = 4326)  
+
+sf_polys <- sf %>% st_cast("POLYGON")
+
+poly_df <- sf_polys %>%
+  st_coordinates() %>%
+  as.data.frame() %>%
+  rename(lon = X, lat = Y) %>%
+  mutate(group = interaction(L1, L2))  # L1 = polygon ID, L2 = ring ID
+
+cb885 <- ggmap(basemap) +
+  geom_polygon(data = poly_df,
+               aes(x = lon, y = lat, group = group),
+               fill = "#DDA448", alpha = 0.4) +
+  #geom_text(x = -109.7785, y = 42.3, label = "*", size = 6, color = "black") +
+  scale_x_continuous(limits = c(-115, -105), expand = c(0,0)) +
+  scale_y_continuous(limits = c(39, 48.5), expand = c(0,0)) +
+  theme_minimal() +
+  theme(axis.text = element_text(),
+        legend.position = "none")
+
+
+```
+
+## Figure 3
+Figure to compare model results across landscape, territory, and nest site scales.
+
+
+```{r betafig, echo=FALSE}
+wd <- c("")  #working directory
+
+#age models....
+load(file=paste0(wd, "FILEPATH")) #landscape mod
+load(file=paste0(wd, "FILEPATH")) #territory mod
+load(file=paste0(wd, "FILEPATH")) #nest site mod
+
+species_cols <- c(
+  "BRSP" = "#55D6BE",
+  "SABS" = "#FA003F",
+  "SATH" = "#DDA448"
+)
+
+
+#landscape first
+
+mcmc <- landscape$summary
+
+beta <- mcmc %>%
+  as.data.frame() %>%
+  mutate(param = rownames(.)) %>%
+  filter(str_detect(param, "^beta[123456]_gPP")) %>%
+  # extract covariate number + species ID
+  mutate(
+    cov = str_extract(param, "beta\\d"),
+    spp = str_extract(param, "\\[(\\d)\\]$") %>% str_remove_all("\\[|\\]") %>% as.numeric()
+  )
+
+beta <- beta %>%
+  mutate(cov_label = dplyr::recode(cov,
+                                   "beta1" = "Sex",
+                                   "beta2" = "Disturbance",
+                                   "beta3" = "Shrub Height",
+                                   "beta4" = "Nest Fail Rate",
+                                   "beta5" = "Shrub Cover", 
+                                   "beta6" = "Age Class"),
+         spp_label = dplyr::recode(as.character(spp),
+                                   "1" = "BRSP",
+                                   "2" = "SABS",
+                                   "3" = "SATH"),
+         sig = if_else(`2.5%` > 0 | `97.5%` < 0, "Non-zero", "Overlaps 0")
+  ) %>%
+  mutate(spp_label = factor(spp_label, levels = c("BRSP", "SABS", "SATH")))
+
+beta_plot <- beta %>%
+  mutate(cov_label = factor(cov_label, levels = c("Shrub Cover", "Shrub Height", 
+                                              "Nest Fail Rate", "Disturbance", 
+                                              "Sex", "Age Class")),
+    draw = !(cov_label == "Age Class" & spp_label == "SATH"),
+    mean_plot = if_else(draw, mean, NA_real_),
+    lwr_plot  = if_else(draw, `2.5%`, NA_real_),
+    upr_plot  = if_else(draw, `97.5%`, NA_real_),
+    label     = if_else(draw & f > 0.9, "*", NA_character_)
+  )
+
+landscape <- ggplot(beta_plot, aes(x = spp_label, y = mean_plot, 
+                              ymin = lwr_plot, ymax = upr_plot,
+                              color = spp_label)) +
+  geom_pointrange(size = 0.8, position = position_dodge(width = 0.5)) +
+  geom_text(aes(label = label, y = lwr_plot), 
+          vjust = 1.5, size = 6, show.legend = FALSE) +
+  facet_wrap(~ cov_label, scales = "free_x", nrow = 1) +
+  scale_color_manual(values = species_cols) +
+  geom_hline(yintercept = 0, linetype = 2, linewidth = 0.7) +
+  labs(x = "Species", y = "Effect on Site Fidelity (β)", color = "") +   #Effect on  (β)
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 16),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16),
+    legend.position = "none"
+  )
+
+# Territory Scale
+mcmc <- territory$summary
+
+beta <- mcmc %>%
+  as.data.frame() %>%
+  mutate(param = rownames(.)) %>%
+  filter(str_detect(param, "^beta[123456]")) %>%
+  # extract covariate number + species ID
+  mutate(
+    cov = str_extract(param, "beta\\d"),
+    spp = str_extract(param, "\\[(\\d)\\]$") %>% str_remove_all("\\[|\\]") %>% as.numeric()
+  )
+
+#flipping this one, so that betas are describing "site fidelity" rather than movement
+beta$mean <- -beta$mean
+beta$`2.5%` <- -(beta$`2.5%`)
+beta$`97.5%` <- -beta$`97.5%`
+
+beta <- beta %>%
+  mutate(cov_label = dplyr::recode(cov,
+                                   "beta1" = "Sex",
+                                   "beta2" = "Nest Fail Rate",
+                                   "beta3" = "Disturbance",
+                                   "beta4" = "Shrub Height",
+                                   "beta5" = "Shrub Cover",
+                                   "beta6" = "Age Class"),
+         spp_label = dplyr::recode(as.character(spp),
+                                   "1" = "BRSP",
+                                   "2" = "SATH",
+                                   "3" = "SABS"),
+         sig = if_else(`2.5%` < 0 | `97.5%` > 0, "Non-zero", "Overlaps 0") #flipped
+  ) %>%
+  mutate(spp_label = factor(spp_label, levels = c("BRSP", "SABS", "SATH")))
+
+beta_plot <- beta %>%
+  mutate(cov_label = factor(cov_label, levels = c("Shrub Cover", "Shrub Height", 
+                                              "Nest Fail Rate", "Disturbance", 
+                                              "Sex", "Age Class")),
+    draw = !(cov_label == "Age Class" & spp_label == "SATH"),
+    mean_plot = if_else(draw, mean, NA_real_),
+    lwr_plot  = if_else(draw, `2.5%`, NA_real_),
+    upr_plot  = if_else(draw, `97.5%`, NA_real_),
+    label     = if_else(draw & f > 0.9, "*", NA_character_)
+  )
+
+local <- ggplot(beta_plot, aes(x = spp_label, y = mean_plot, 
+                              ymin = lwr_plot, ymax = upr_plot,
+                              color = spp_label)) +
+  geom_pointrange(size = 0.8, position = position_dodge(width = 0.5)) +
+  geom_text(aes(label = label, y = upr_plot), 
+          vjust = 1.5, size = 6, show.legend = FALSE) +
+  facet_wrap(~ cov_label, scales = "free_x", nrow = 1) +
+  scale_color_manual(values = species_cols) +
+  geom_hline(yintercept = 0, linetype = 2, linewidth = 0.7) +
+  labs(x = "Species", y = "Effect on Site Fidelity (β)", color = "") +   #Effect on  (β)
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 16),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16),
+    legend.position = "none"
+  )
+
+# adding in nest site scale
+
+mcmc <- nestsite$summary
+
+beta <- mcmc %>%
+  as.data.frame() %>%
+  mutate(param = rownames(.)) %>%
+  filter(str_detect(param, "^beta[123456]")) %>%
+  # extract covariate number + species ID
+  mutate(
+    cov = str_extract(param, "beta\\d"),
+    spp = str_extract(param, "\\[(\\d)\\]$") %>% str_remove_all("\\[|\\]") %>% as.numeric()
+  )
+
+#flipping this one, so that betas are describing "site fidelity" rather than movement
+beta$mean <- -beta$mean
+beta$`2.5%` <- -(beta$`2.5%`)
+beta$`97.5%` <- -beta$`97.5%`
+
+beta <- beta %>%
+  mutate(cov_label = dplyr::recode(cov,
+                                   "beta1" = "Sex",
+                                   "beta2" = "Nest Fate",
+                                   "beta3" = "Disturbance",
+                                   "beta4" = "Shrub Height",
+                                   "beta5" = "Shrub Cover",
+                                   "beta6" = "Age Class"),
+         spp_label = dplyr::recode(as.character(spp),
+                                   "1" = "BRSP",
+                                   "2" = "SATH",
+                                   "3" = "SABS"),
+         sig = if_else(`2.5%` > 0 | `97.5%` < 0, "Non-zero", "Overlaps 0")
+  ) %>%
+  mutate(spp_label = factor(spp_label, levels = c("BRSP", "SABS", "SATH")))
+
+beta_plot <- beta %>%
+  mutate(cov_label = factor(cov_label, levels = c("Shrub Cover", "Shrub Height", 
+                                              "Nest Fate", "Disturbance", 
+                                              "Sex", "Age Class")),
+    draw = !(cov_label == "Age Class" & spp_label == "SATH"),
+    mean_plot = if_else(draw, mean, NA_real_),
+    lwr_plot  = if_else(draw, `2.5%`, NA_real_),
+    upr_plot  = if_else(draw, `97.5%`, NA_real_),
+    label     = if_else(draw & f > 0.9, "*", NA_character_)
+  )
+
+nest <- ggplot(beta_plot, aes(x = spp_label, y = mean_plot, 
+                              ymin = lwr_plot, ymax = upr_plot,
+                              color = spp_label)) +
+  geom_pointrange(size = 0.8, position = position_dodge(width = 0.5)) +
+  geom_text(aes(label = label, y = upr_plot), 
+          vjust = 1.5, size = 6, show.legend = FALSE) +
+  coord_cartesian(ylim = c(min(na.omit(beta_plot$upr_plot)) - 0.6, max(na.omit(beta_plot$lwr_plot)))) +
+  facet_wrap(~ cov_label, scales = "free_x", nrow = 1) +
+  scale_color_manual(values = species_cols) +
+  geom_hline(yintercept = 0, linetype = 2, linewidth = 0.7) +
+  labs(x = "Species", y = "Effect on Site Fidelity (β)", color = "") +   #Effect on  (β)
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 16),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16),
+    legend.position = "bottom",       
+    legend.direction = "horizontal",
+    legend.box = "horizontal",     
+    legend.text = element_text(size = 16),
+  )
+
+landscape <- landscape + theme(plot.title = element_text(size = 16))
+local     <- local     + theme(plot.title = element_text(size = 16))
+nest      <- nest      + theme(plot.title = element_text(size = 16))
+
+final_plot <- 
+  landscape + 
+  labs(title = "Landscape") +
+  local + 
+  labs(title = "Territory") +
+  nest + 
+  labs(title = "Nest-Site") +
+  plot_layout(ncol = 1) +
+  plot_annotation(theme = theme(plot.title = element_text(size = 16)))
+
+```
+
+## Figure 4
+
+Histograms to visualize typically territory shifts for each species, and movement toward/away from disturbance for individuals tracked over multiple years.
+
+```{r fig4, echo=FALSE}
+
+species_cols <- c(
+  "BRSP" = "#55D6BE",
+  "SABS" = "#FA003F",
+  "SATH" = "#DDA448"
+)
+
+#bring in & format data for this fig
+
+surv <- read.csv("./FILEPATH/SageSongbirdSurv_Final.csv", colClasses = c(ch = "character"))
+
+test <- surv %>%
+  dplyr::select(BandNumber, Species, Sex, plot,
+                mean_utme_2020, mean_utmn_2020,
+                mean_utme_2021, mean_utmn_2021, 
+                mean_utme_2022, mean_utmn_2022,
+                mean_utme_2023, mean_utmn_2023, 
+                mean_utme_2024, mean_utmn_2024, 
+                kmdistur2020, kmdistur2021, kmdistur2022, kmdistur2023, kmdistur2024) %>%
+  dplyr::mutate(
+    dist2020_2021 = as.numeric(sqrt((mean_utme_2021 - mean_utme_2020)^2 +
+                                      (mean_utmn_2021 - mean_utmn_2020)^2)),
+    dist2021_2022 = as.numeric(sqrt((mean_utme_2022 - mean_utme_2021)^2 +
+                                      (mean_utmn_2022 - mean_utmn_2021)^2)),
+    dist2022_2023 = as.numeric(sqrt((mean_utme_2023 - mean_utme_2022)^2 +
+                                      (mean_utmn_2023 - mean_utmn_2022)^2)),
+    dist2023_2024 = as.numeric(sqrt((mean_utme_2024 - mean_utme_2023)^2 +
+                                      (mean_utmn_2024 - mean_utmn_2023)^2))
+  )
+
+plotdat <- test %>%
+  transmute(
+    BandNumber,
+    Species,
+    Sex,
+    plot,
+    year = 2020, 
+    kmdistur = kmdistur2020,
+    distance = dist2020_2021) %>%
+  bind_rows(
+    test %>%
+      transmute(
+        BandNumber,
+        Species,
+        Sex,
+        plot,
+        year = 2021,
+        kmdistur = kmdistur2021,
+        distance = dist2021_2022),
+    test %>%
+      transmute(
+        BandNumber,
+        Species,
+        Sex,
+        plot,
+        year = 2022,
+        kmdistur = kmdistur2022,
+        distance = dist2022_2023),
+    test %>%
+      transmute(
+        BandNumber,
+        Species,
+        Sex,
+        plot,
+        year = 2023,
+        kmdistur = kmdistur2023,
+        distance = dist2023_2024))
+
+#prep data for jags
+
+mod_dat <- plotdat %>%
+  dplyr::filter(!is.na(distance)) %>%
+  dplyr::mutate(sex = case_when(Sex == "M" ~ 1, Sex == "F" ~ 0, Sex == "U" ~ NA_real_))
+
+mod_dat <- mod_dat %>%
+  mutate(
+    species_id = as.integer(as.factor(Species)),
+    band_id = as.integer(as.factor(BandNumber)),
+    year_id = as.integer(as.factor(year)))
+x_max <- max(mod_dat$distance, na.rm = TRUE)
+
+hist1 <- ggplot(mod_dat[mod_dat$Species == "BRSP", ], aes(x = distance)) +
+  annotate(
+    "rect",
+    xmin = 131.55 * 2, xmax = 165.09 * 2,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey70", alpha = 0.4
+  ) +
+    geom_vline(
+    xintercept = (150.59*2),  # median territory size (diameter)
+    linetype = "dotted",
+    linewidth = 1,
+    color = "black"
+  ) +
+  geom_histogram(
+    bins = 30,
+    fill = "#55D6BE",      
+    color = "#55D6BE",       
+    alpha = 0.80
+  ) +
+  coord_cartesian(xlim = c(0, x_max)) +
+  labs(x = NULL, y = "Count") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.title.y = element_blank())
+
+
+hist2 <- ggplot(mod_dat[mod_dat$Species == "SABS", ], aes(x = distance)) +
+    annotate(
+    "rect",
+    xmin = 141.05 * 2, xmax = 179.52 * 2,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey70", alpha = 0.4
+  ) +
+    geom_vline(
+    xintercept = (162.05*2),  # median territory size (diameter)
+    linetype = "dotted",
+    linewidth = 1,
+    color = "black"
+  ) +
+  geom_histogram(
+    bins = 30,
+    fill = "#FA003F",     
+    color = "#FA003F",      
+    alpha = 0.80
+  ) +
+  coord_cartesian(xlim = c(0, x_max)) +
+  labs(x = NULL, y = "Count") +
+  theme_classic(base_size = 16) +
+  theme(axis.text.x  = element_blank())
+
+
+hist3 <- ggplot(mod_dat[mod_dat$Species == "SATH", ], aes(x = distance)) +
+    annotate(
+    "rect",
+    xmin = 151.91 * 2, xmax = 181.18 * 2,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey70", alpha = 0.4
+  ) +
+    geom_vline(
+    xintercept = (166.89*2),  # median territory size (diameter)
+    linetype = "dotted",
+    linewidth = 1,
+    color = "black"
+  ) +
+  geom_histogram(
+    bins = 30,
+    fill = "#DDA448",     
+    color = "#DDA448",      
+    alpha = 0.70
+  ) +
+  coord_cartesian(xlim = c(0, x_max)) +
+  labs(
+    x = "Distance territory shifted (m)",
+    y = "Count"
+  ) +
+  theme_classic(base_size = 16) +
+  theme(axis.title.x = element_text(face = "plain"),
+        axis.title.y = element_blank())
+
+left_col <- hist1 / hist2 / hist3
+
+plotdat2 <- plotdat %>%
+  dplyr::filter(!is.na(kmdistur)) %>%
+  dplyr::mutate(Species = factor(Species, levels = c("BRSP", "SABS", "SATH"))) %>%
+  group_by(BandNumber) %>%
+  filter(n() >= 2) %>%   # keep only individuals with ≥ 2 years
+  dplyr::mutate(year_since_first = year - min(year),
+                dist_rel = kmdistur - first(kmdistur) ) %>%
+  ungroup() 
+
+plot1 <- ggplot(plotdat2, aes(x = year_since_first, y = dist_rel,
+                     group = BandNumber, color = Species)) +
+  geom_line(size = 1, alpha = 0.7) +
+  geom_point(alpha = 0.6) +
+  labs(x = "Years since first capture",
+       y = expression("Relative "*Delta*" disturbance (proportion)")) +
+  scale_color_manual(values = c(
+    "BRSP" = "#55D6BE",
+    "SABS" = "#FA003F",
+    "SATH" = "#DDA448"
+  )) +
+  theme_classic(base_size = 16)
+
+combined_plot <- left_col | plot1
+
+```
+
+## Table 1
+
+Post-hoc pairwise credible differences between years in site fidelity of Brewer’s sparrows, sagebrush sparrows, and sage thrashers.
+
+```{r time, echo=FALSE}
+
+#landscape fidelity model...
+beta0_samps <- landscape$sims.list$beta0_gPP
+
+#territory fidelity model... (Sags and sath are switched)
+beta0_samps <- territory$sims.list$beta0
+
+#nest fidelity model... (SAGS and SATH are switched)
+beta0_samps <- nestsite$sims.list$beta0
+
+yrs <- 1:4
+pairs <- combn(yrs, 2, simplify = FALSE)
+#brsp
+results <- lapply(pairs, function(p) {
+  d <- beta0_samps[, p[1], 1] - beta0_samps[, p[2], 1]
+  data.frame(
+    contrast = paste0("beta0[", p[1], ",1] - beta0[", p[2], ",1]"),
+    median = median(d),
+    lwr = quantile(d, 0.025),
+    upr = quantile(d, 0.975),
+    prob_gt0 = bayestestR::pd(d)
+  )
+})
+
+do.call(rbind, results)
+
+#sags
+results <- lapply(pairs, function(p) {
+  d <- beta0_samps[, p[1], 2] - beta0_samps[, p[2], 2]
+  data.frame(
+    contrast = paste0("beta0[", p[1], ",2] - beta0[", p[2], ",2]"),
+    median = median(d),
+    lwr = quantile(d, 0.025),
+    upr = quantile(d, 0.975),
+    prob_gt0 = bayestestR::pd(d)
+  )
+})
+
+do.call(rbind, results)
+
+#sath
+results <- lapply(pairs, function(p) {
+  d <- beta0_samps[, p[1], 3] - beta0_samps[, p[2], 3]
+  data.frame(
+    contrast = paste0("beta0[", p[1], ",3] - beta0[", p[2], ",3]"),
+    median = median(d),
+    lwr = quantile(d, 0.025),
+    upr = quantile(d, 0.975),
+    prob_gt0 = bayestestR::pd(d)
+  )
+})
+
+do.call(rbind, results)
+
+```

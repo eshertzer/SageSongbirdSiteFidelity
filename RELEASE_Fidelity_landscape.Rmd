@@ -1,0 +1,714 @@
+---
+title: "Fidelity_landscape"
+author: "Emily Shertzer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Overview 
+
+This script creates a multi-state robust design mark recapture model, used to estimated landscape-scale fidelity for the manuscript "Site fidelity of sagebrush songbirds largely invariant with cues of previous nest success or habitat disturbance across spatial scales".
+
+Covariates: disturbance, nest failure rates (plot/year), shrub height, shrub cover, tag status (mark), crew (observer)
+
+Data: Shertzer, E.R., and Chalfoun, A.D., 2026, Mark recapture and habitat data for adult sagebrush songbirds tracked in Pinedale, Wyoming during 2020 - 2024: U.S. Geological Survey data release, https://doi.org/10.5066/P1EOPE4V.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, echo = FALSE}
+# clear environment
+rm(list = ls())
+
+require(jagsUI)
+library(MCMCpack)
+library(abind)
+library(tidyverse)
+library(dplyr)
+library(AHMbook)
+library(lubridate)
+library(ggplot2)
+library(loo)
+#no sci notation
+options(scipen = 999)
+```
+
+## Data prep
+
+```{r data_prep}
+surv <- read.csv("./SageSongbirdSurv_Final.csv", colClasses = c(ch = "character"))
+
+# adding two dummy secondary periods (2020 only had 1 real secondary period)
+surv$ch <- paste("00", surv$ch, sep = "")
+
+#now, removing birds that were captured in the last primary period
+surv <- surv %>%
+  dplyr::filter(ch != "000000000000001") %>%
+  dplyr::filter(!ch %in% c("000000000000111", "000000000000110", "000000000000101", "000000000000011", "000000000000100", "000000000000010"))
+
+#Data prep matrices for the model
+species <- surv$Species
+species[species == "BRSP"] <- 1
+species[species == "SABS"] <- 2
+species[species == "SATH"] <- 3
+species <- as.numeric(species)
+n.ind.s <- table(species)
+
+#now, making a matrix of the ch for the model
+ch <- apply((do.call("rbind",strsplit(surv$ch,""))),2,as.numeric)
+
+#creating list of primary periods and f_ann (primary period of first capture)
+ch_ann<-cbind(ch[,3],1*rowSums(ch[,4:6])>0,1*rowSums(ch[,7:9])>0, 1*rowSums(ch[,10:12])>0, 1*rowSums(ch[,13:15])>0)
+f_ann<-apply(ch_ann,1,which.max)
+#convert ch_ann to 1 and 2s; 1= seen, 2 =not seen
+ch_ann[ch_ann == 0] <- 2
+
+# Observation matrix
+
+n.ind <- nrow(ch)      # number of individuals
+n.prim <- 5            # number of primary periods
+n.sec <- rep(3, n.prim)
+n.sec[1] <- 1          #first primary only had 1 secondary period
+n.spp <- 3
+
+obs <- array(NA, dim = c(n.ind, n.prim, max(n.sec)))
+
+# Fill the obs array
+for (i in 1:n.ind) {
+  for (t in 1:n.prim) {
+    cols <- ((t - 1) * n.sec[t] + 1):(t * n.sec[t])  
+    obs[i, t, 1:n.sec[t]] <- ch[i, cols]
+  }
+}
+
+obs[, 1, 1:2] <- NA   # mark secondary 1 and 2 in primary 1 as missing
+
+#adding in the species dimension
+ch_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+obs_array <- array(NA, dim = c(max(n.ind.s), n.prim, 3, n.spp))
+
+
+for (s in 1:n.spp) {
+  ind_s <- which(species == s)     # which rows belong to species s
+  n_s   <- length(ind_s)           # number of individuals of species s
+  
+  ch_array[1:n_s, , s] <- as.matrix(ch_ann[ind_s, ])
+  obs_array[1:n_s, , ,s] <- as.matrix(obs[ind_s,,])
+}
+
+
+#sex: M = 1, F = 0, U = NA
+sex <- replace(1*(surv$Sex=="M"),surv$Sex=="U",NA)
+
+#prepping crew covariate (for detection)
+crew<- cbind(surv$site2020, surv$site2021, surv$site2022, surv$site2023, surv$site2024)
+all_crew <- sort(unique(as.vector(crew)))
+crew_map <- setNames(seq_along(all_crew), all_crew)
+crew <- matrix(crew_map[as.character(crew)], nrow = nrow(crew))
+n.crew <- length(all_crew)
+
+#prepping disturbance covariate
+disturb<- cbind(surv$kmdistur2020, surv$kmdistur2021, surv$kmdistur2022, surv$kmdistur2023, surv$kmdistur2024)
+disturb_scale<- scale(disturb, center=TRUE, scale=TRUE) #scale it
+
+#prepping frate covariate (plot/year level nest failure rate)
+frate <- cbind(surv$frate2020, surv$frate2021, surv$frate2022, surv$frate2023, surv$frate2024)
+frate_scale<- scale(frate, center=TRUE, scale=TRUE) #scale it
+
+#prepping veg covariates 
+vegheight <- cbind(surv$shrub_height_mean2020, surv$shrub_height_mean2021, surv$shrub_height_mean2022, surv$shrub_height_mean2023, surv$shrub_height_mean2024)
+vegheight_scale<- scale(vegheight, center=TRUE, scale=TRUE) #scale it
+
+vegcov <- cbind(surv$veg_cover_mean2020, surv$veg_cover_mean2021, surv$veg_cover_mean2022, surv$veg_cover_mean2023, surv$veg_cover_mean2024)
+vegcov_scale<- scale(vegcov, center=TRUE, scale=TRUE) #scale it
+
+#fix ages.... so that AHY is NA in first year
+surv <- surv %>%
+  dplyr::mutate(age2020 = dplyr::if_else(Age == 1 & Year == 2020, NA, age2020),
+                age2021 = dplyr::if_else(Age == 1 & Year == 2021, NA, age2021),
+                age2022 = dplyr::if_else(Age == 1 & Year == 2022, NA, age2022),
+                age2023 = dplyr::if_else(Age == 1 & Year == 2023, NA, age2023),
+                age2024 = dplyr::if_else(Age == 1 & Year == 2024, NA, age2024))
+
+age <- cbind(surv$age2020, surv$age2021, surv$age2022, surv$age2023, surv$age2024)
+#bin age into 0's and 1s (0 = SY, 1 = ASY)
+age <- ifelse(is.na(age), NA,
+              ifelse(age == 2, 0, 1))
+
+#prep tag data data
+mark <- cbind(surv$marker2020, surv$marker2021, surv$marker2022, surv$marker2023, surv$marker2024)
+
+mark[is.na(mark) | mark == ""] <- "N"
+mark[mark == "N"] <- 1
+mark[mark == "GEO"] <- 2
+mark[mark == "LT"] <- 3
+mark <- matrix(as.numeric(mark), nrow = nrow(mark))
+
+# prep plot data
+plot <- surv$plot
+plot[plot == "J0"] <- 1
+plot[plot == "J11"] <- 2
+plot[plot == "J17"] <- 3
+plot[plot == "P0"] <- 4
+plot[plot == "P0 OFF"] <- 4
+plot[plot == "P8"] <- 5
+plot[plot == "P34"] <- 6
+plot[plot == "P38"] <- 7
+plot <- as.numeric(plot)
+
+#prepping all of these covariates for multi-species dimensions....
+first_array  <- array(NA, dim = c(max(n.ind.s), n.spp))
+sex_array  <- array(NA, dim = c(max(n.ind.s), n.spp))
+plot_array  <- array(NA, dim = c(max(n.ind.s), n.spp))
+crew_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+disturb_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+age_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+mark_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+frate_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+vegheight_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+vegcov_array  <- array(NA, dim = c(max(n.ind.s), n.prim, n.spp))
+
+for (s in 1:n.spp) {
+  ind_s <- which(species == s)     # which rows belong to species s
+  n_s   <- length(ind_s)           # number of individuals of species s
+  
+  first_array[1:n_s, s] <- as.matrix(f_ann[ind_s])
+  sex_array[1:n_s, s] <- as.matrix(sex[ind_s])
+  plot_array[1:n_s, s] <- as.matrix(plot[ind_s])
+  crew_array[1:n_s, ,s] <- as.matrix(crew[ind_s,])
+  disturb_array[1:n_s, ,s] <- as.matrix(disturb_scale[ind_s,])
+  age_array[1:n_s, ,s] <- as.matrix(age[ind_s,])
+  mark_array[1:n_s, ,s] <- as.matrix(mark[ind_s,])
+  frate_array[1:n_s, ,s] <- as.matrix(frate_scale[ind_s,])
+  vegheight_array[1:n_s, ,s] <- as.matrix(vegheight_scale[ind_s,])
+  vegcov_array[1:n_s, ,s] <- as.matrix(vegcov_scale[ind_s,])
+}
+
+#b/c of small sample sizes and effects from those, making all SATH ages into NA:
+age_array[,,3] <- NA 
+
+```
+
+## Collinearity check
+
+Functions from:
+Mixed effects models and extensions in ecology with R. (2009).
+Zuur, AF, Ieno, EN, Walker, N, Saveliev, AA, and Smith, GM. Springer.
+
+```{r collinearity, echo=FALSE}
+panel.cor <- function(x, y, digits=1, prefix="", cex.cor = 6)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r1=cor(x,y,use="pairwise.complete.obs")
+  r <- abs(cor(x, y,use="pairwise.complete.obs"))
+  txt <- format(c(r1, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  if(missing(cex.cor)) { cex <- 0.9/strwidth(txt) } else {
+    cex = cex.cor}
+  text(0.5, 0.5, txt, cex = cex * r)
+}
+
+cor_check <- surv %>%
+  dplyr::select(BandNumber, kmdistur2021, kmdistur2022, kmdistur2023,
+                frate2021, frate2022, frate2023,
+                shrub_height_mean2021, shrub_height_mean2022, shrub_height_mean2023,
+                veg_cover_mean2021, veg_cover_mean2022, veg_cover_mean2023,
+                plot) %>%
+  pivot_longer(
+    cols = c(kmdistur2021, kmdistur2022, kmdistur2023,
+             frate2021, frate2022, frate2023,
+             shrub_height_mean2021, shrub_height_mean2022, shrub_height_mean2023,
+             veg_cover_mean2021, veg_cover_mean2022, veg_cover_mean2023),
+    names_to = c(".value","year"),
+    names_pattern = "(.*)(\\d{4})"
+  ) %>%
+  mutate(plot = as.factor(plot))
+
+MyVar <- c("kmdistur", "frate", "shrub_height_mean", "veg_cover_mean", "plot")
+
+pairs(cor_check[,MyVar], lower.panel = panel.cor)
+
+#Plot is a categorical variable, so collinearity was assessed visually for plot
+
+```
+
+## RD Model
+
+```{r rd_model, echo=FALSE}
+sink("spp_multiveg_age_markov.jags")
+cat("
+model {
+
+########################################################################## 
+#--------------------------------------
+# Parameters:
+# phi: survival probability
+# p: detection probability
+# gPP: temporary emigration parameter ( probability of remaining onsite, conditional on survival)
+# gP: site immigration parameter (probability of returning onsite, conditional on survival)
+#--------------------------------------
+# States (S):
+# 1 alive - observable (on site)
+# 2 alive - nonobservable (off site)
+# 3 dead
+# Observations (O):
+# 1 seen 
+# 2 not seen
+#--------------------------------------
+##########################################################################
+
+
+# priors - data imputation
+psi ~ dunif(0,1)  #prior for sex ratio
+psi2 ~ dunif(0,1)  #prior for age ratio
+
+mu_disturb ~ dnorm(0, 0.01)
+tau_disturb <- pow(sd_disturb, -2)
+sd_disturb ~ dunif(0, 5)
+
+mu_frate ~ dnorm(0, 0.01)   
+tau_frate <- pow(sd_frate, -2)
+sd_frate ~ dunif(0, 5)
+
+mu_vegheight ~ dnorm(0, 0.01)    
+tau_vegheight <- pow(sd_vegheight, -2)
+sd_vegheight ~ dunif(0, 5)
+
+mu_vegcov ~ dnorm(0, 0.01)
+tau_vegcov <- pow(sd_vegcov, -2)
+sd_vegcov ~ dunif(0, 5)
+
+#phi priors
+
+mu_beta1_phi ~ dnorm(0, 0.01)   # effect of sex
+mu_beta2_phi ~ dnorm(0, 0.01)   # effect of disturbance
+mu_beta3_phi ~ dnorm(0, 0.01)   # effect of veg height
+mu_beta4_phi ~ dnorm(0, 0.01)   # effect of frate
+mu_beta5_phi ~ dnorm(0, 0.01)   # effect of veg cover
+
+sigma_beta1_phi ~ dunif(0, 5)
+tau_beta1_phi <- pow(sigma_beta1_phi, -2)
+sigma_beta2_phi ~ dunif(0, 5)
+tau_beta2_phi <- pow(sigma_beta2_phi, -2)
+sigma_beta3_phi ~ dunif(0, 5)
+tau_beta3_phi <- pow(sigma_beta3_phi, -2)
+sigma_beta4_phi ~ dunif(0, 5)
+tau_beta4_phi <- pow(sigma_beta4_phi, -2)
+sigma_beta5_phi ~ dunif(0, 5)
+tau_beta5_phi <- pow(sigma_beta5_phi, -2)
+
+for (s in 1:n.spp){
+  beta1_phi[s] ~ dnorm(mu_beta1_phi, tau_beta1_phi) # prior for effect of sex on phi
+  beta2_phi[s] ~ dnorm(mu_beta2_phi, tau_beta2_phi) #prior for effect of disturbance on phi
+  beta3_phi[s] ~ dnorm(mu_beta3_phi, tau_beta3_phi)  # effect of veg height
+  beta4_phi[s] ~ dnorm(mu_beta4_phi, tau_beta4_phi)  # effect of frate
+  beta5_phi[s] ~ dnorm(mu_beta5_phi, tau_beta5_phi)  # effect of veg cover
+}
+
+#prior for the effect of marker (tag) on phi
+alpha2_phi[1] <- 0 #reference level (No marker)
+for (m in 2:3) {
+  alpha2_phi[m] ~ dnorm(0, (1/2.25))   
+}
+
+#gamma priors: sex + disturb + frate
+for(s in 1:n.spp){
+beta1_gPP[s] ~ dnorm(mu_beta1_gPP, tau_beta1_gPP)   # prior for effect of sex on gammaPP
+beta2_gPP[s] ~ dnorm(mu_beta2_gPP, tau_beta2_gPP)   # prior for effect of disturbance on gammaPP
+beta3_gPP[s] ~ dnorm(mu_beta3_gPP, tau_beta3_gPP)  # prior for effect of veg height on gamPP
+beta4_gPP[s] ~ dnorm(mu_beta4_gPP, tau_beta4_gPP)   # prior for effect of frate
+beta5_gPP[s] ~ dnorm(mu_beta5_gPP, tau_beta5_gPP)   # prior for effect of veg cover
+beta6_gPP[s] ~ dnorm(mu_beta6_gPP, tau_beta6_gPP)   # prior for effect of age
+}
+
+mu_beta1_gPP ~ dnorm(0, 0.01)
+mu_beta2_gPP ~ dnorm(0, 0.01)
+mu_beta3_gPP ~ dnorm(0, 0.01)
+mu_beta4_gPP ~ dnorm(0, 0.01)
+mu_beta5_gPP ~ dnorm(0, 0.01)
+mu_beta6_gPP ~ dnorm(0, 0.01)
+
+sigma_beta1_gPP ~ dunif(0, 5)
+tau_beta1_gPP <- pow(sigma_beta1_gPP, -2)
+sigma_beta2_gPP ~ dunif(0, 5)
+tau_beta2_gPP <- pow(sigma_beta2_gPP, -2)
+sigma_beta3_gPP ~ dunif(0, 5)
+tau_beta3_gPP <- pow(sigma_beta3_gPP, -2)
+sigma_beta4_gPP ~ dunif(0, 5)
+tau_beta4_gPP <- pow(sigma_beta4_gPP, -2)
+sigma_beta5_gPP ~ dunif(0, 5)
+tau_beta5_gPP <- pow(sigma_beta5_gPP, -2)
+sigma_beta6_gPP ~ dunif(0, 5)
+tau_beta6_gPP <- pow(sigma_beta6_gPP, -2)
+
+#detection priors: crew + marker + sex
+#prior for effect of crew on p
+alpha1_p[1] <- 0 #reference level
+for (k in 2:n.crew) {
+  alpha1_p[k] ~ dnorm(0, (1/2.25))   # prior on crew effect on logit(p) 
+}
+#prior for the effect of marker (tag) on p
+alpha2_p[1] <- 0 #reference level (No marker)
+for (m in 2:3) {
+  alpha2_p[m] ~ dnorm(0, (1/2.25))  
+}
+
+#prior for effect of sex on p
+for(s in 1:n.spp){
+
+beta1_p[s] ~ dnorm(mu_beta1_p, tau_beta_p)   # prior for effect of sex on p
+
+}
+mu_beta1_p ~ dnorm(0, 0.01)
+sigma_beta_p ~ dunif(0, 5)
+tau_beta_p <- pow(sigma_beta_p, -2)
+
+
+# Priors for intercepts
+for (s in 1:n.spp) {
+for (t in 1:(n.prim-1)){   
+  beta0_phi[t,s] ~ dnorm(mu_beta0_phi, tau_beta0_phi)    #phi intercept
+  beta0_gPP[t,s]  ~ dnorm(mu_beta0_gPP, tau_beta0_gPP)   #gPP: prob of staying available given you were available
+                                                         #gamPP: probability of emigrating away given you were avail
+}
+}
+
+mu_beta0_phi ~ dnorm(0, 0.01)
+sigma_beta0_phi ~ dunif(0, 5)
+tau_beta0_phi <- pow(sigma_beta0_phi, -2)
+
+mu_beta0_gPP ~ dnorm(0, 0.01)
+sigma_beta0_gPP ~ dunif(0, 5)
+tau_beta0_gPP <- pow(sigma_beta0_gPP, -2)
+
+for (s in 1:n.spp){
+for (i in 1:n.ind[s]){
+    sex[i,s] ~ dbern(psi)    # imputation
+    
+    for (t in 1:(n.prim-1)) {
+      frate[i,t,s] ~ dnorm(mu_frate, tau_frate)
+      disturb[i,t,s] ~ dnorm(mu_disturb, tau_disturb)
+      vegheight[i,t,s] ~ dnorm(mu_vegheight, tau_vegheight)
+      vegcov[i,t,s] ~ dnorm(mu_vegcov, tau_vegcov)
+      age[i,t,s] ~ dbern(psi2)  
+    
+      logit(phi[i,t,s]) <- beta0_phi[t,s] + beta1_phi[s]*sex[i,s] + beta2_phi[s]*disturb[i,t,s] + beta3_phi[s]*vegheight[i,t,s] + beta4_phi[s]*frate[i,t,s] + beta5_phi[s]*vegcov[i,t,s] + alpha2_phi[mark[i,t,s]]
+      logit(gPP[i,t,s]) <- beta0_gPP[t,s] + beta1_gPP[s]*sex[i,s] + beta2_gPP[s]*disturb[i,t,s] + beta3_gPP[s]*vegheight[i,t,s] + beta4_gPP[s]*frate[i,t,s] + beta5_gPP[s]*vegcov[i,t,s] + beta6_gPP[s]*age[i,t,s]
+      
+    } #t
+    
+    for (t in 1:(n.prim-2)){
+    
+      gP[i,t,s] ~ dunif(0,1)
+      
+    } #t
+    } # s
+} #i
+
+
+
+##########################################################################
+# Secondary occasions p's
+##########################################################################     
+for (s in 1:n.spp){
+for (j in 1:3){
+    beta0_p[j,s] ~ dnorm(0, (1/2.25))
+}
+}
+
+for (s in 1:n.spp){
+  for (i in 1:n.ind[s]){
+    for (t in 1:n.prim) {
+      for (j in 1:3){
+        logit(p[i,t,j,s]) <- beta0_p[j,s] + alpha1_p[crew[i,t,s]] + alpha2_p[mark[i,t,s]] + beta1_p[s]*sex[i,s]
+    }
+    }
+}
+}
+  
+
+###########################################################################
+# Primary occasions p's
+###########################################################################  
+for (s in 1:n.spp){
+for (i in 1:n.ind[s]) {
+  for (t in 2:n.prim){  
+    pstar[i,t,s] <- 1 - prod(1 - p[i,t,1:n.sec[t],s])
+  }
+}
+}
+
+
+# state matrices
+for(s in 1:n.spp){
+for(i in 1:n.ind[s]){
+  sm[i,1,1,1,s] <- phi[i,1,s] * gPP[i,1,s]
+  sm[i,1,1,2,s] <- phi[i,1,s] * (1 - gPP[i,1,s])
+  sm[i,1,1,3,s] <- 1 - phi[i,1,s]
+  sm[i,2,1,1,s] <- 0               
+  sm[i,2,1,2,s] <- 1
+  sm[i,2,1,3,s] <- 0
+  sm[i,3,1,1,s] <- 0
+  sm[i,3,1,2,s] <- 0
+  sm[i,3,1,3,s] <- 1
+}
+}
+
+for(s in 1:n.spp){
+for(i in 1:n.ind[s]){
+    for(t in 2:(n.prim-1)) {
+    sm[i,1,t,1,s] <- phi[i,t,s] * gPP[i,t,s]
+    sm[i,1,t,2,s] <- phi[i,t,s] * (1 - gPP[i,t,s])
+    sm[i,1,t,3,s] <- 1 - phi[i,t,s]
+    sm[i,2,t,1,s] <- phi[i,t,s] * gP[i,t-1,s]
+    sm[i,2,t,2,s] <- phi[i,t,s] * (1 - gP[i,t-1,s])
+    sm[i,2,t,3,s] <- 1 - phi[i,t,s]
+    sm[i,3,t,1,s] <- 0
+    sm[i,3,t,2,s] <- 0
+    sm[i,3,t,3,s] <- 1
+    }
+}
+}
+
+    # observation matrices (o[i, state, t, obs])
+for(s in 1:n.spp){
+    for (i in 1:n.ind[s]){
+      for (t in 2:n.prim){
+        o[i,1,t,1,s] <- pstar[i,t,s]
+        o[i,1,t,2,s] <- 1 - pstar[i,t,s]
+        o[i,2,t,1,s] <- 0
+        o[i,2,t,2,s] <- 1
+        o[i,3,t,1,s] <- 0
+        o[i,3,t,2,s] <- 1
+      }
+    }
+}
+  
+
+# Likelihood
+
+ # State process: the latent state
+ for(s in 1:n.spp){
+ for (i in 1:n.ind[s]){
+ 
+      z[i,first[i,s],s] <- 1  #individuals are state 1 for first cap
+      
+       for (t in (first[i,s]+1):n.prim){
+       # State process: draw S(t) given S(t-1)
+         z[i,t,s] ~ dcat(sm[i,z[i,t-1,s],t-1,1:3,s])   
+         
+      # Observation process: draw O(t) given S(t) using individual-specific o
+         ch[i,t,s] ~ dcat(o[i, z[i,t,s], t,1:2,s]) 
+        
+    
+     for (j in 1:n.sec[t-1]){
+       mu3[i,t-1,j,s] <- equals(z[i,t-1,s],1) * p[i,t-1,j,s]
+       obs[i,t-1,j,s] ~ dbern(mu3[i,t-1,j,s])
+  
+     } # j
+   } # t
+ } # i
+ } #s
+      
+
+########################################################################
+#estimating derived parameters
+########################################################################
+
+# detection by species
+for (s in 1:n.spp){
+    mean_pstar[s] <- mean(pstar[1:n.ind[s], 2:n.prim, s])
+  }
+
+# detection by month
+for (s in 1:n.spp){
+  for (j in 1:max(n.sec)){
+    mean_p[j,s] <- mean(p[1:n.ind[s], 2:n.prim, j, s])
+  }
+}
+
+#survival 
+#removing 2020 b/c of low sample size (2:(n.prim-1))
+#phi by species
+for (s in 1:n.spp){
+    mean_phi[s] <- mean(phi[1:n.ind[s], 2:(n.prim-1), s])
+}
+
+#phi by species & year
+for (s in 1:n.spp){
+for (t in 2:(n.prim-1)){
+    mean_phi_yr[t,s] <- mean(phi[1:n.ind[s], t, s])
+}
+}
+
+for (s in 1:n.spp) {
+  for (m in 1:3) {
+    num_tag[s,m]  <- sum(equals(mark[1:n.ind[s], 2:(n.prim-1), s], m))
+    sum_phi_tag[s,m] <- sum(phi[1:n.ind[s], 2:(n.prim-1), s] * equals(mark[1:n.ind[s], 2:(n.prim-1), s], m))
+    mean_phi_tag[s,m] <- sum_phi_tag[s,m] / num_tag[s,m]
+  }
+}
+
+#gamma by species
+for (s in 1:n.spp){
+    mean_gPP[s] <- mean(gPP[1:n.ind[s], 2:(n.prim-1), s])
+    mean_gP[s] <- mean(gP[1:n.ind[s], 2:(n.prim-2), s])
+    mean_gamPP[s] <- 1 - mean_gPP[s]     # MARK parameterization
+    mean_gamP[s] <- 1 - mean_gP[s]     # MARK parameterization
+}
+
+#gamma by species & year
+for (s in 1:n.spp){
+  for (t in 2:(n.prim-1)){
+    mean_gPP_yr[t,s] <- mean(gPP[1:n.ind[s], t, s])
+    mean_gamPP_yr[t,s] <- 1 - mean_gPP_yr[t,s]     # MARK parameterization
+  }
+  for (t in 2:(n.prim-2)){
+    mean_gP_yr[t,s] <- mean(gP[1:n.ind[s], t, s])
+    mean_gamP_yr[t,s] <- 1 - mean_gP_yr[t,s]     # MARK parameterization
+  }
+}
+
+
+#Bayes p - checking model fit
+
+ for(s in 1:n.spp){
+  for (i in 1:n.ind[s]){
+  
+      for (t in 1:first[i,s]) {
+        ch.new[i,t,s] <- ch[i,t,s]
+        }
+
+      for (t in (first[i,s]+1):n.prim){
+      
+      #Bayes p calc
+        ch.new[i,t,s] ~ dcat(o[i, z[i,t,s], t, 1:2, s]) #dmultinom
+       }
+  }
+ }
+
+for(s in 1:n.spp){
+
+  total_new[s] <- sum(ch.new[1:n.ind[s],1:n.prim,s])
+  total_obs[s] <- sum(ch[1:n.ind[s],1:n.prim,s])
+
+  bayes.p[s] <- step(total_new[s] - total_obs[s])
+}
+
+
+}", fill = TRUE)
+sink()
+
+```
+
+## Model prep and run
+
+```{r prep_run, echo=FALSE}
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# MCMC settings
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+
+n.chains <- 3
+n.thin <- 5
+n.adapt <- 10000
+n.iter <- 100000
+n.burnin <- 15000
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# Initial values
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+
+#initials by spp.
+z.init <- array(NA, dim = dim(ch_array))
+start_row <- 1
+for (s in 1:n.spp) {
+  n_s <- sum(species == s)  # number of individuals for species s
+  rows <- start_row:(start_row + n_s - 1)
+  
+  for (i in 1:n_s) {
+    f_i <- f_ann[rows[i]]  # first primary period for this individual
+    
+    if(f_i < n.prim){
+      z.init[i, (f_i + 1):n.prim, s] <- 1
+    }
+  }
+  
+  start_row <- start_row + n_s
+}
+
+#except for these known states
+# BRSP - no known morts, some known temp emig.
+
+z.init[124,3,1] <- 2
+z.init[152,3,1] <- 2
+
+#SAGS - no known temp emig, some known mortalities
+
+z.init[124,5,2] <- 3
+z.init[58,5,2] <- 3
+z.init[108,5,2] <- 3
+
+#SATH
+
+z.init[22,5,3] <- 3
+z.init[35,3,3] <- 2
+
+
+init <- function(){list(z = z.init)} 
+
+z.known <- array(NA, dim = dim(ch_array))
+
+init <- function(){list(z = z.init)} 
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# Bundle data
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+jags_data <- list(n.ind  = c(323, 133, 60),             
+                  n.prim = ncol(ch_ann),             
+                  n.sec  = n.sec, 
+                  ch      = ch_array,        
+                  obs    = obs_array,     
+                  first  = first_array,        
+                  sex = sex_array,
+                  crew = crew_array,
+                  n.crew = n.crew,
+                  disturb = disturb_array,
+                  n.spp = n.spp,
+                  mark = mark_array,
+                  frate = frate_array,
+                  vegheight = vegheight_array,
+                  vegcov = vegcov_array,
+                  age = age_array
+)
+
+
+
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+# Parameters monitored
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%#
+
+pars <- c("mean_pstar", "mean_p","mean_phi", "mean_phi_yr", "mean_phi_tag",
+          "mean_gamPP", "mean_gamP", "mean_gamPP_yr", "mean_gamP_yr", 
+          "beta1_phi", "beta2_phi", "beta3_phi", "beta4_phi", "beta5_phi", "alpha2_phi", 
+          "beta1_gPP", "beta2_gPP", "beta3_gPP", "beta4_gPP", "beta5_gPP", "beta6_gPP",
+          "beta1_p", "beta0_phi", "beta0_gPP", "beta0_gP", "bayes.p")
+
+landscape <- jags(data = jags_data, inits = init, parameters.to.save = pars, model.file = "spp_multiveg_age_markov.jags", 
+                                          n.chains = n.chains, n.adapt = n.adapt, n.iter = n.iter, n.burnin = n.burnin,
+                                          n.thin = n.thin, n.cores = n.chains, parallel = TRUE)
+
+```
+
+
+## Model assessment
+
+
+```{r assessment, echo=FALSE}
+
+jagsUI::densityplot(landscape)
+jagsUI::traceplot(landscape)
+
+```
+
